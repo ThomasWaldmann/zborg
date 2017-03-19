@@ -49,6 +49,14 @@ def start_thread(func, *args):
     return thread
 
 
+def write_file(path, data, sync=True):
+    with open(path, 'wb') as f:
+        f.write(data)
+        if sync:
+            f.flush()
+            os.fsync(f.fileno())
+
+
 @socket('discover_socket', zmq.PULL)
 @socket('reader_socket', zmq.PUSH)
 def discover_worker(context, discover_url, reader_url, discover_socket, reader_socket):
@@ -182,10 +190,7 @@ def data_writer_worker(context, data_writer_url, repo, data_writer_socket):
             else:
                 break
         id, data = obj
-        with open(chunk_path(repo, id), 'wb') as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
+        write_file(chunk_path(repo, id), data)
 
 
 @socket('item_handler_socket', zmq.PULL)
@@ -216,10 +221,7 @@ def item_handler_worker(context, item_handler_url, repo, item_handler_socket):
             item['chunks'] = [id for chunk_no, id in sorted(item['chunks'])]
             item_json = json.dumps(item, indent=4).encode()
             item_id = id_hash(item_json)
-            with open(meta_path(repo, item_id), 'wb') as f:
-                f.write(item_json)
-                f.flush()
-                os.fsync(f.fileno())
+            write_file(meta_path(repo, item_id), item_json)
     assert not items
 
 
