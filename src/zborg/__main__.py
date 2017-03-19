@@ -150,31 +150,31 @@ def checker_worker(context, checker_url, compressor_url, repo, checker_socket, c
 
 
 @socket('compressor_socket', zmq.PULL)
-@socket('writer_socket', zmq.PUSH)
-def compressor_worker(context, compressor_url, writer_url, compressor_socket, writer_socket):
+@socket('data_writer_socket', zmq.PUSH)
+def compressor_worker(context, compressor_url, data_writer_url, compressor_socket, data_writer_socket):
     """compress a chunk"""
     compressor_socket.hwm = HWM_CHUNK_DATA
     compressor_socket.connect(compressor_url)
-    writer_socket.hwm = HWM_CHUNK_DATA
-    writer_socket.connect(writer_url)
+    data_writer_socket.hwm = HWM_CHUNK_DATA
+    data_writer_socket.connect(data_writer_url)
     while True:
         obj = compressor_socket.recv_pyobj()
         if obj is DIE:
             break
         id, data = obj
         cdata = zlib.compress(data, COMPRESSION_LEVEL)
-        writer_socket.send_pyobj((id, cdata))
-    writer_socket.send_pyobj(DIE)
+        data_writer_socket.send_pyobj((id, cdata))
+    data_writer_socket.send_pyobj(DIE)
 
 
-@socket('writer_socket', zmq.PULL)
-def writer_worker(context, writer_url, repo, writer_socket):
+@socket('data_writer_socket', zmq.PULL)
+def data_writer_worker(context, data_writer_url, repo, data_writer_socket):
     """write a chunk to the repo"""
-    writer_socket.hwm = HWM_CHUNK_DATA
-    writer_socket.bind(writer_url)
+    data_writer_socket.hwm = HWM_CHUNK_DATA
+    data_writer_socket.bind(data_writer_url)
     dying = 0
     while True:
-        obj = writer_socket.recv_pyobj()
+        obj = data_writer_socket.recv_pyobj()
         if obj is DIE:
             dying += 1
             if dying < N_COMPRESSORS:
@@ -224,9 +224,9 @@ def item_handler_worker(context, item_handler_url, repo, item_handler_socket):
 
 
 def start_threads(repo):
-    discover_url, reader_url, hasher_url, checker_url, compressor_url, writer_url, item_handler_url = \
+    discover_url, reader_url, hasher_url, checker_url, compressor_url, data_writer_url, item_handler_url = \
         ['inproc://%s' % name
-         for name in 'discover,reader,hasher,checker,compressor,writer,item_handler'.split(',')]
+         for name in 'discover,reader,hasher,checker,compressor,data_writer,item_handler'.split(',')]
     context = zmq.Context()
     discover_socket = context.socket(zmq.PUSH)
     discover_socket.connect(discover_url)
@@ -236,8 +236,8 @@ def start_threads(repo):
         start_thread(hasher_worker, context, hasher_url, checker_url, item_handler_url)
     start_thread(checker_worker, context, checker_url, compressor_url, repo)
     for i in range(N_COMPRESSORS):
-        start_thread(compressor_worker, context, compressor_url, writer_url)
-    start_thread(writer_worker, context, writer_url, repo)
+        start_thread(compressor_worker, context, compressor_url, data_writer_url)
+    start_thread(data_writer_worker, context, data_writer_url, repo)
     start_thread(item_handler_worker, context, item_handler_url, repo)
     return discover_socket
 
