@@ -22,6 +22,7 @@ import zmq
 from zmq.decorators import socket
 
 
+N_HASHERS = 4
 N_COMPRESSORS = 4
 COMPRESSION_LEVEL = 9  # zlib 1..9
 HWM_CHUNK_DATA =  200  # high-water-mark for sockets that carry messages that contain chunk data
@@ -76,7 +77,7 @@ def reader_worker(context, reader_url, hasher_url, item_handler_url,
     """read a file <src> and chunk it"""
     reader_socket.bind(reader_url)
     hasher_socket.hwm = HWM_CHUNK_DATA
-    hasher_socket.connect(hasher_url)
+    hasher_socket.bind(hasher_url)
     item_handler_socket.connect(item_handler_url)
     while True:
         obj = reader_socket.recv_pyobj()
@@ -95,7 +96,8 @@ def reader_worker(context, reader_url, hasher_url, item_handler_url,
                     # chunk_no is the sequence number of the current chunk
                     hasher_socket.send_pyobj((src, chunk_no, data))
                 chunk_no += 1
-    hasher_socket.send_pyobj(DIE)
+    for i in range(N_HASHERS):
+        hasher_socket.send_pyobj(DIE)
     item_handler_socket.send_pyobj(DIE)
 
 
@@ -106,7 +108,7 @@ def hasher_worker(context, hasher_url, checker_url, item_handler_url,
                   hasher_socket, checker_socket, item_handler_socket):
     """compute hash of a chunk"""
     hasher_socket.hwm = HWM_CHUNK_DATA
-    hasher_socket.bind(hasher_url)
+    hasher_socket.connect(hasher_url)
     checker_socket.hwm = HWM_CHUNK_DATA
     checker_socket.connect(checker_url)
     item_handler_socket.connect(item_handler_url)
@@ -130,10 +132,15 @@ def checker_worker(context, checker_url, compressor_url, repo, checker_socket, c
     checker_socket.bind(checker_url)
     compressor_socket.hwm = HWM_CHUNK_DATA
     compressor_socket.bind(compressor_url)
+    dying = 0
     while True:
         obj = checker_socket.recv_pyobj()
         if obj is DIE:
-            break
+            dying += 1
+            if dying < N_HASHERS:
+                continue
+            else:
+                break
         src, chunk_no, id, data = obj
         have_chunk = os.path.exists(chunk_path(repo, id))
         if not have_chunk:
@@ -191,7 +198,7 @@ def item_handler_worker(context, item_handler_url, repo, item_handler_socket):
         obj = item_handler_socket.recv_pyobj()
         if obj is DIE:
             dying += 1
-            if dying < 2:
+            if dying < N_HASHERS + 1:
                 continue
             else:
                 break
@@ -225,7 +232,8 @@ def start_threads(repo):
     discover_socket.connect(discover_url)
     start_thread(discover_worker, context, discover_url, reader_url)
     start_thread(reader_worker, context, reader_url, hasher_url, item_handler_url)
-    start_thread(hasher_worker, context, hasher_url, checker_url, item_handler_url)
+    for i in range(N_HASHERS):
+        start_thread(hasher_worker, context, hasher_url, checker_url, item_handler_url)
     start_thread(checker_worker, context, checker_url, compressor_url, repo)
     for i in range(N_COMPRESSORS):
         start_thread(compressor_worker, context, compressor_url, writer_url)
