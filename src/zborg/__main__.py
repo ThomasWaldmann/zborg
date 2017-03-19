@@ -22,6 +22,7 @@ import zmq
 from zmq.decorators import socket
 
 
+N_COMPRESSORS = 4
 COMPRESSION_LEVEL = 9  # zlib 1..9
 HWM_CHUNK_DATA =  200  # high-water-mark for sockets that carry messages that contain chunk data
 CHUNK_SIZE = 2 ** 20
@@ -128,7 +129,7 @@ def checker_worker(context, checker_url, compressor_url, repo, checker_socket, c
     checker_socket.hwm = HWM_CHUNK_DATA
     checker_socket.bind(checker_url)
     compressor_socket.hwm = HWM_CHUNK_DATA
-    compressor_socket.connect(compressor_url)
+    compressor_socket.bind(compressor_url)
     while True:
         obj = checker_socket.recv_pyobj()
         if obj is DIE:
@@ -137,7 +138,8 @@ def checker_worker(context, checker_url, compressor_url, repo, checker_socket, c
         have_chunk = os.path.exists(chunk_path(repo, id))
         if not have_chunk:
             compressor_socket.send_pyobj((id, data))
-    compressor_socket.send_pyobj(DIE)
+    for i in range(N_COMPRESSORS):
+        compressor_socket.send_pyobj(DIE)
 
 
 @socket('compressor_socket', zmq.PULL)
@@ -145,7 +147,7 @@ def checker_worker(context, checker_url, compressor_url, repo, checker_socket, c
 def compressor_worker(context, compressor_url, writer_url, compressor_socket, writer_socket):
     """compress a chunk"""
     compressor_socket.hwm = HWM_CHUNK_DATA
-    compressor_socket.bind(compressor_url)
+    compressor_socket.connect(compressor_url)
     writer_socket.hwm = HWM_CHUNK_DATA
     writer_socket.connect(writer_url)
     while True:
@@ -163,10 +165,15 @@ def writer_worker(context, writer_url, repo, writer_socket):
     """write a chunk to the repo"""
     writer_socket.hwm = HWM_CHUNK_DATA
     writer_socket.bind(writer_url)
+    dying = 0
     while True:
         obj = writer_socket.recv_pyobj()
         if obj is DIE:
-            break
+            dying += 1
+            if dying < N_COMPRESSORS:
+                continue
+            else:
+                break
         id, data = obj
         with open(chunk_path(repo, id), 'wb') as f:
             f.write(data)
@@ -220,7 +227,8 @@ def start_threads(repo):
     start_thread(reader_worker, context, reader_url, hasher_url, item_handler_url)
     start_thread(hasher_worker, context, hasher_url, checker_url, item_handler_url)
     start_thread(checker_worker, context, checker_url, compressor_url, repo)
-    start_thread(compressor_worker, context, compressor_url, writer_url)
+    for i in range(N_COMPRESSORS):
+        start_thread(compressor_worker, context, compressor_url, writer_url)
     start_thread(writer_worker, context, writer_url, repo)
     start_thread(item_handler_worker, context, item_handler_url, repo)
     return discover_socket
