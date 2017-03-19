@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.so
+
+.Python
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+sdist/
+*.egg-info/
+*.egg
+
+# Unit test / coverage reports
+.tox/
+.cache
+
+repo/
