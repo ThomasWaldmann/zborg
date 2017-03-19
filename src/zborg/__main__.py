@@ -215,7 +215,13 @@ def start_threads(repo):
     return discover_socket
 
 
+def repo_prepare(repo):
+    os.makedirs(meta_path(repo, ''), exist_ok=True)
+    os.makedirs(chunk_path(repo, ''), exist_ok=True)
+
+
 def main(repo, paths):
+    repo_prepare(repo)
     discover_socket = start_threads(repo)
     for path in paths:
         discover_socket.send_pyobj((path, ))
