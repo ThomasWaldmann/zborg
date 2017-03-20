@@ -20,9 +20,10 @@ from threading import Thread
 
 import zmq
 from zmq.decorators import socket
+from zmq.devices.basedevice import ThreadDevice
 
-
-N_HASHERS = 4
+SYNC = True
+N_READERS = N_HASHERS = 4
 N_COMPRESSORS = 4
 COMPRESSION_LEVEL = 9  # zlib 1..9
 HWM_CHUNK_DATA =  200  # high-water-mark for sockets that carry messages that contain chunk data
@@ -49,7 +50,7 @@ def start_thread(func, *args):
     return thread
 
 
-def write_file(path, data, sync=True):
+def write_file(path, data, sync=SYNC):
     with open(path, 'wb') as f:
         f.write(data)
         if sync:
@@ -62,7 +63,7 @@ def write_file(path, data, sync=True):
 def discover_worker(context, discover_url, reader_url, discover_socket, reader_socket):
     """discover filenames of regular files below <root>"""
     discover_socket.bind(discover_url)
-    reader_socket.connect(reader_url)
+    reader_socket.bind(reader_url)
     while True:
         obj = discover_socket.recv_pyobj()
         if obj is DIE:
@@ -74,18 +75,19 @@ def discover_worker(context, discover_url, reader_url, discover_socket, reader_s
                 st = os.stat(fpath, follow_symlinks=False)
                 if stat.S_ISREG(st.st_mode):
                     reader_socket.send_pyobj((fpath, ))
-    reader_socket.send_pyobj(DIE)
+    for i in range(N_READERS):
+        reader_socket.send_pyobj(DIE)
 
 
 @socket('reader_socket', zmq.PULL)
 @socket('hasher_socket', zmq.PUSH)
 @socket('item_handler_socket', zmq.PUSH)
-def reader_worker(context, reader_url, hasher_url, item_handler_url,
+def reader_worker(context, reader_url, rh_s_fe_url, item_handler_url,
                   reader_socket, hasher_socket, item_handler_socket):
     """read a file <src> and chunk it"""
-    reader_socket.bind(reader_url)
+    reader_socket.connect(reader_url)
     hasher_socket.hwm = HWM_CHUNK_DATA
-    hasher_socket.bind(hasher_url)
+    hasher_socket.connect(rh_s_fe_url)
     item_handler_socket.connect(item_handler_url)
     while True:
         obj = reader_socket.recv_pyobj()
@@ -104,19 +106,18 @@ def reader_worker(context, reader_url, hasher_url, item_handler_url,
                     # chunk_no is the sequence number of the current chunk
                     hasher_socket.send_pyobj((src, chunk_no, data))
                 chunk_no += 1
-    for i in range(N_HASHERS):
-        hasher_socket.send_pyobj(DIE)
+    hasher_socket.send_pyobj(DIE)
     item_handler_socket.send_pyobj(DIE)
 
 
 @socket('hasher_socket', zmq.PULL)
 @socket('checker_socket', zmq.PUSH)
 @socket('item_handler_socket', zmq.PUSH)
-def hasher_worker(context, hasher_url, checker_url, item_handler_url,
+def hasher_worker(context, rh_s_be_url, checker_url, item_handler_url,
                   hasher_socket, checker_socket, item_handler_socket):
     """compute hash of a chunk"""
     hasher_socket.hwm = HWM_CHUNK_DATA
-    hasher_socket.connect(hasher_url)
+    hasher_socket.connect(rh_s_be_url)
     checker_socket.hwm = HWM_CHUNK_DATA
     checker_socket.connect(checker_url)
     item_handler_socket.connect(item_handler_url)
@@ -203,7 +204,7 @@ def item_handler_worker(context, item_handler_url, repo, item_handler_socket):
         obj = item_handler_socket.recv_pyobj()
         if obj is DIE:
             dying += 1
-            if dying < N_HASHERS + 1:
+            if dying < N_READERS + N_HASHERS:
                 continue
             else:
                 break
@@ -226,16 +227,23 @@ def item_handler_worker(context, item_handler_url, repo, item_handler_socket):
 
 
 def start_threads(repo):
-    discover_url, reader_url, hasher_url, checker_url, compressor_url, data_writer_url, item_handler_url = \
-        ['inproc://%s' % name
-         for name in 'discover,reader,hasher,checker,compressor,data_writer,item_handler'.split(',')]
+    discover_url, reader_url, rh_s_fe_url, rh_s_be_url, hasher_url, checker_url, compressor_url, \
+    data_writer_url, item_handler_url = ['inproc://%s' % name
+    for name in 'discover,reader,rhsfe,rhsbe,hasher,checker,compressor,data_writer,item_handler'.split(',')]
     context = zmq.Context()
     discover_socket = context.socket(zmq.PUSH)
     discover_socket.connect(discover_url)
     start_thread(discover_worker, context, discover_url, reader_url)
-    start_thread(reader_worker, context, reader_url, hasher_url, item_handler_url)
+    for i in range(N_READERS):
+        start_thread(reader_worker, context, reader_url, rh_s_fe_url, item_handler_url)
+    # we have multiple readers and multiple hashers, thus we need a streamer to connect them:
+    rh_streamer = ThreadDevice(zmq.STREAMER, zmq.PULL, zmq.PUSH)
+    rh_streamer.context_factory = lambda: context
+    rh_streamer.bind_in(rh_s_fe_url)
+    rh_streamer.bind_out(rh_s_be_url)
+    rh_streamer.start()  # XXX since adding this thread, process does not terminate
     for i in range(N_HASHERS):
-        start_thread(hasher_worker, context, hasher_url, checker_url, item_handler_url)
+        start_thread(hasher_worker, context, rh_s_be_url, checker_url, item_handler_url)
     start_thread(checker_worker, context, checker_url, compressor_url, repo)
     for i in range(N_COMPRESSORS):
         start_thread(compressor_worker, context, compressor_url, data_writer_url)
